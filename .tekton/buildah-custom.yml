@@ -1,0 +1,121 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: buildah-custom
+  labels:
+    app.kubernetes.io/version: "1.0"
+  annotations:
+    tekton.dev/categories: Image Build
+    tekton.dev/pipelines.minVersion: "0.17.0"
+    tekton.dev/tags: image-build
+    tekton.dev/displayName: "buildah custom unprivileged"
+spec:
+  description: >-
+    Buildah task builds source into a container image and pushes it to a registry.
+    This version runs without privileged mode using vfs storage driver.
+  params:
+    - name: IMAGE
+      description: Reference of the image buildah will produce
+      type: string
+    - name: BUILDER_IMAGE
+      description: The location of the buildah builder image
+      type: string
+      default: quay.io/buildah/stable:v1.33
+    - name: STORAGE_DRIVER
+      description: Set buildah storage driver
+      type: string
+      default: vfs
+    - name: DOCKERFILE
+      description: Path to the Dockerfile to build
+      type: string
+      default: ./Dockerfile
+    - name: CONTEXT
+      description: Path to the directory to use as context
+      type: string
+      default: .
+    - name: TLSVERIFY
+      description: Verify the TLS on the registry endpoint
+      type: string
+      default: "true"
+    - name: FORMAT
+      description: The format of the built container, oci or docker
+      type: string
+      default: docker
+    - name: BUILD_EXTRA_ARGS
+      description: Extra parameters passed for the build command
+      type: string
+      default: ""
+    - name: PUSH_EXTRA_ARGS
+      description: Extra parameters passed for the push command
+      type: string
+      default: ""
+    - name: SKIP_PUSH
+      description: Skip pushing the built image
+      type: string
+      default: "false"
+  workspaces:
+    - name: source
+      description: Workspace containing the source code to build
+  results:
+    - name: IMAGE_DIGEST
+      description: Digest of the image just built
+    - name: IMAGE_URL
+      description: URL of the image just built
+  steps:
+    - name: build-and-push
+      image: $(params.BUILDER_IMAGE)
+      workingDir: $(workspaces.source.path)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      script: |
+        #!/usr/bin/env bash
+        set -e
+        
+        echo "=========================================="
+        echo "Building image: $(params.IMAGE)"
+        echo "Using storage driver: $(params.STORAGE_DRIVER)"
+        echo "Dockerfile: $(params.DOCKERFILE)"
+        echo "Context: $(params.CONTEXT)"
+        echo "=========================================="
+        
+        # Build the image
+        buildah --storage-driver=$(params.STORAGE_DRIVER) bud \
+          --format=$(params.FORMAT) \
+          --tls-verify=$(params.TLSVERIFY) \
+          --no-cache \
+          -f $(params.DOCKERFILE) \
+          -t $(params.IMAGE) \
+          $(params.BUILD_EXTRA_ARGS) \
+          $(params.CONTEXT)
+        
+        echo "=========================================="
+        echo "Build completed successfully!"
+        echo "=========================================="
+        
+        # Skip push if requested
+        if [ "$(params.SKIP_PUSH)" = "true" ]; then
+          echo "Skipping push as requested"
+          exit 0
+        fi
+        
+        echo "=========================================="
+        echo "Pushing image to registry..."
+        echo "=========================================="
+        
+        # Push the image
+        buildah --storage-driver=$(params.STORAGE_DRIVER) push \
+          --tls-verify=$(params.TLSVERIFY) \
+          --digestfile /tmp/image-digest \
+          $(params.PUSH_EXTRA_ARGS) \
+          $(params.IMAGE) \
+          docker://$(params.IMAGE)
+        
+        echo "=========================================="
+        echo "Image pushed successfully!"
+        echo "=========================================="
+        
+        # Save results
+        cat /tmp/image-digest | tee $(results.IMAGE_DIGEST.path)
+        echo -n "$(params.IMAGE)" | tee $(results.IMAGE_URL.path)
